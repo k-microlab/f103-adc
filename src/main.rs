@@ -20,6 +20,7 @@ use embedded_graphics::{
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, StrokeAlignment, Triangle};
 use micromath::F32;
 use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
+use stm32f1xx_hal::adc::{Adc, SampleTime};
 
 #[entry]
 fn main() -> ! {
@@ -60,7 +61,14 @@ fn main() -> ! {
     }*/
 
     // Setup pins
+    let mut gpioa = device.GPIOA.split();
+
+    let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
+
     let mut gpiob = device.GPIOB.split();
+
+    let mut adc = Adc::adc1(device.ADC1, clocks);
+    adc.set_sample_time(SampleTime::T_239);
 
     let scl = gpiob.pb6.into_alternate_open_drain(&mut gpiob.crl);
     let sda = gpiob.pb7.into_alternate_open_drain(&mut gpiob.crl);
@@ -95,47 +103,19 @@ fn main() -> ! {
         .build();
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
 
-    let mut i = 0;
-
     loop {
+        let mut buffer = [0u16; 128];
+
+        for b in buffer.iter_mut() {
+            *b = adc.read(&mut adc_ch0).unwrap();
+        }
+
         display.clear();
-        let yoffset = (F32(10.0) + F32(i as f32).sin() * F32(5.0)).0 as i32;
-
-        Triangle::new(
-            Point::new(16, 16 + yoffset),
-            Point::new(16 + 16, 16 + yoffset),
-            Point::new(16 + 8, yoffset),
-        )
-            .into_styled(border_stroke)
-            .draw(&mut display).unwrap();
-
-        let yoffset = (F32(10.0) + F32(i as f32 + core::f32::consts::PI / 3.0).sin() * F32(5.0)).0 as i32;
-        // Draw a filled square
-        Rectangle::new(Point::new(52, yoffset), Size::new(16, 16))
-            .into_styled(fill)
-            .draw(&mut display).unwrap();
-
-        let yoffset = (F32(10.0) + F32(i as f32 + 2.0 * core::f32::consts::PI / 3.0).sin() * F32(5.0)).0 as i32;
-        // Draw a circle with a 3px wide stroke.
-        Circle::new(Point::new(88, yoffset), 17)
-            .into_styled(border_stroke)
-            .draw(&mut display).unwrap();
-
-        /*let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::On)
-            .build();
-
-        Text::with_baseline("Привет, мир!", Point::zero(), text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
-
-        Text::with_baseline("Hello Rust!", Point::new(0, 16), text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();*/
+        for (x, v) in buffer.iter().enumerate() {
+            let y = *v as u32 / 128;
+            display.set_pixel(x as u32, y, true);
+        }
 
         display.flush().unwrap();
-
-        i += 1;
     }
 }
