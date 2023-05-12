@@ -2,15 +2,24 @@
 #![no_std]
 #![no_main]
 
+use core::ops::Mul;
 use defmt_rtt as _;
 use panic_probe as _;
 
-use cortex_m::singleton;
 use cortex_m_rt::entry;
 use stm32f1xx_hal::{pac, prelude::*};
 
-use stm32f1xx_hal::adc::{Adc, SampleTime};
-use stm32f1xx_hal::serial::{Config, Serial};
+use stm32f1xx_hal::i2c::{BlockingI2c, DutyCycle, Mode};
+
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::{Baseline, Text},
+};
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, StrokeAlignment, Triangle};
+use micromath::F32;
+use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 
 #[entry]
 fn main() -> ! {
@@ -51,72 +60,82 @@ fn main() -> ! {
     }*/
 
     // Setup pins
-    let mut gpioa = device.GPIOA.split();
     let mut gpiob = device.GPIOB.split();
 
-    let dma = device.DMA1.split();
-    let mut dma_ch1 = dma.1;
-    let mut dma_ch2 = dma.2;
+    let scl = gpiob.pb6.into_alternate_open_drain(&mut gpiob.crl);
+    let sda = gpiob.pb7.into_alternate_open_drain(&mut gpiob.crl);
 
-    let mut adc = Adc::adc1(device.ADC1, clocks);
-    adc.set_sample_time(SampleTime::T_1);
+    let i2c = BlockingI2c::i2c1(
+        device.I2C1,
+        (scl, sda),
+        &mut afio.mapr,
+        Mode::Fast {
+            frequency: 400.kHz(),
+            duty_cycle: DutyCycle::Ratio16to9,
+        },
+        clocks,
+        1000,
+        10,
+        1000,
+        1000,
+    );
 
-    let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
-    let rx = gpiob.pb11;
-    let mut sc = Config::default();
-    sc.baudrate = 256000.bps();
+    let interface = I2CDisplayInterface::new(i2c);
+    let mut display = Ssd1306::new(
+        interface,
+        DisplaySize128x32,
+        DisplayRotation::Rotate0,
+    ).into_buffered_graphics_mode();
+    display.init().unwrap();
 
-    let mut serial = Serial::new(device.USART3, (tx, rx), &mut afio.mapr, sc, &clocks);
+    let border_stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(3)
+        .stroke_alignment(StrokeAlignment::Inside)
+        .build();
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
 
-    // Configure pa0 as an analog input
-    let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
-
-    // let mut timer = dp.TIM3.delay_us(&clocks);
-
-    let mut buffer = singleton!(: [u16; 1024] = [0; 1024]).unwrap().as_mut_slice();
-    let mut sending = singleton!(: [u16; 1024] = [0; 1024]).unwrap().as_mut_slice();
-
-    defmt::info!("vref");
-
-    let vref = adc.read_vref();
-
-    defmt::info!("measure");
+    let mut i = 0;
 
     loop {
-        let val: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        serial.bwrite_all(val.to_ne_bytes().as_slice()).unwrap();
-    }
+        display.clear();
+        let yoffset = (F32(10.0) + F32(i as f32).sin() * F32(5.0)).0 as i32;
 
-    let (mut s_tx, _) = serial.split();
+        Triangle::new(
+            Point::new(16, 16 + yoffset),
+            Point::new(16 + 16, 16 + yoffset),
+            Point::new(16 + 8, yoffset),
+        )
+            .into_styled(border_stroke)
+            .draw(&mut display).unwrap();
 
-    loop {
-        let v: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        if v > 500 / vref {
-            let adc_dma = adc.with_dma(adc_ch0, dma_ch1);
+        let yoffset = (F32(10.0) + F32(i as f32 + core::f32::consts::PI / 3.0).sin() * F32(5.0)).0 as i32;
+        // Draw a filled square
+        Rectangle::new(Point::new(52, yoffset), Size::new(16, 16))
+            .into_styled(fill)
+            .draw(&mut display).unwrap();
 
-            let (buf, adc_dma) = adc_dma.read(buffer).wait();
+        let yoffset = (F32(10.0) + F32(i as f32 + 2.0 * core::f32::consts::PI / 3.0).sin() * F32(5.0)).0 as i32;
+        // Draw a circle with a 3px wide stroke.
+        Circle::new(Point::new(88, yoffset), 17)
+            .into_styled(border_stroke)
+            .draw(&mut display).unwrap();
 
-            for c in &mut *buf {
-                *c = v;
-            }
+        /*let text_style = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::On)
+            .build();
 
-            let dma_tx = s_tx.with_dma(dma_ch2);
+        Text::with_baseline("Привет, мир!", Point::zero(), text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
 
-            let (buf, tx_dma) = dma_tx.write(bytemuck::cast_slice_mut::<u16, u8>(buf)).wait();
+        Text::with_baseline("Hello Rust!", Point::new(0, 16), text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();*/
 
-            let (tx, tch) = tx_dma.release();
+        display.flush().unwrap();
 
-            // Consumes the AdcDma struct, restores adc configuration to previous state and returns the
-            // Adc struct in normal mode.
-            let (a, ach, dch) = adc_dma.split();
-
-            adc = a;
-            adc_ch0 = ach;
-            dma_ch1 = dch;
-            dma_ch2 = tch;
-            buffer = bytemuck::cast_slice_mut::<u8, u16>(buf);
-            s_tx = tx;
-            // timer.delay_us(297)
-        }
+        i += 1;
     }
 }
