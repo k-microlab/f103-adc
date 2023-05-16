@@ -2,6 +2,7 @@
 #![no_std]
 #![no_main]
 
+use core::fmt::Write;
 use core::ops::Mul;
 use defmt_rtt as _;
 use panic_probe as _;
@@ -9,18 +10,16 @@ use panic_probe as _;
 use cortex_m_rt::entry;
 use stm32f1xx_hal::{pac, prelude::*};
 
-use stm32f1xx_hal::i2c::{BlockingI2c, DutyCycle, Mode};
-
-use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
-    pixelcolor::BinaryColor,
-    prelude::*,
-    text::{Baseline, Text},
-};
-use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, StrokeAlignment, Triangle};
-use micromath::F32;
-use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
+use embedded_hal::spi::{Mode, Phase, Polarity};
+use embedded_hal::blocking::spi::{Transfer as SpiTransfer, Write as SpiWrite};
+use stm32f1xx_hal::spi::Spi;
 use stm32f1xx_hal::adc::{Adc, SampleTime};
+use mfrc522::{Initialized, Mfrc522, WithNssDelay};
+
+pub const MODE: Mode = Mode {
+    polarity: Polarity::IdleLow,
+    phase: Phase::CaptureOnFirstTransition,
+};
 
 #[entry]
 fn main() -> ! {
@@ -38,84 +37,89 @@ fn main() -> ! {
 
     // Freeze the configuration of all the clocks in the system and store the frozen frequencies in
     // `clocks`
-    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let clocks = rcc.cfgr/*
+        .sysclk(72.MHz())
+        .hclk(72.MHz())
+        .pclk1(36.MHz())
+        .pclk2(72.MHz())
+        */.freeze(&mut flash.acr);
 
     let mut afio = device.AFIO.constrain();
 
-    /*// Acquire the GPIOC peripheral
-    let mut gpioc = dp.GPIOC.split();
-
-    // Configure gpio C pin 13 as a push-pull output. The `crh` register is passed to the function
-    // in order to configure the port. For pins 0-7, crl should be passed instead.
-    let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
-    // Configure the syst timer to trigger an update every second
-    let mut timer = Timer::syst(cp.SYST, &clocks).counter_hz();
-    timer.start(1.Hz()).unwrap();
-
-    // Wait for the timer to trigger an update and change the state of the LED
-    loop {
-        block!(timer.wait()).unwrap();
-        led.set_high();
-        block!(timer.wait()).unwrap();
-        led.set_low();
-    }*/
-
-    // Setup pins
     let mut gpioa = device.GPIOA.split();
 
-    let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
-
-    let mut gpiob = device.GPIOB.split();
-
-    let mut adc = Adc::adc1(device.ADC1, clocks);
-    adc.set_sample_time(SampleTime::T_239);
-
-    let scl = gpiob.pb6.into_alternate_open_drain(&mut gpiob.crl);
-    let sda = gpiob.pb7.into_alternate_open_drain(&mut gpiob.crl);
-
-    let i2c = BlockingI2c::i2c1(
-        device.I2C1,
-        (scl, sda),
+    let sck = gpioa.pa5.into_alternate_push_pull(&mut gpioa.crl);
+    let miso = gpioa.pa6;
+    let mosi = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
+    let spi = Spi::spi1(
+        device.SPI1,
+        (sck, miso, mosi),
         &mut afio.mapr,
-        Mode::Fast {
-            frequency: 400.kHz(),
-            duty_cycle: DutyCycle::Ratio16to9,
-        },
+        MODE,
+        1024.kHz(),
         clocks,
-        1000,
-        10,
-        1000,
-        1000,
     );
 
-    let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306::new(
-        interface,
-        DisplaySize128x32,
-        DisplayRotation::Rotate0,
-    ).into_buffered_graphics_mode();
-    display.init().unwrap();
-
-    let border_stroke = PrimitiveStyleBuilder::new()
-        .stroke_color(BinaryColor::On)
-        .stroke_width(3)
-        .stroke_alignment(StrokeAlignment::Inside)
-        .build();
-    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let nss = gpioa.pa4.into_push_pull_output(&mut gpioa.crl);
+    let mut mfrc522 = Mfrc522::new(spi).with_nss(nss).init().unwrap();
 
     loop {
-        let mut buffer = [0u16; 128];
+        if let Ok(atqa) = mfrc522.new_card_present() {
+            if let Ok(uid) = mfrc522.select(&atqa) {
+                defmt::info!("* {:?}", uid.as_bytes());
 
-        for b in buffer.iter_mut() {
-            *b = adc.read(&mut adc_ch0).unwrap();
+                handle_authenticate(&mut mfrc522, &uid, |m| {
+                    match m.mf_read(1) {
+                        Ok(data) => {
+                            defmt::println!("read {:?}", data);
+
+                            let buffer = [
+                               0x0F, 0x0E, 0x0D, 0x0C,
+                               0x0B, 0x0A, 0x09, 0x08,
+                               0x07, 0x06, 0x05, 0x04,
+                               0x03, 0x02, 0x01, 0x00,
+                            ];
+                            /*match m.mf_write(1, buffer) {
+                               Ok(_) => {
+                                   defmt::println!("write success");
+                               }
+                               Err(_) => {
+                                   defmt::println!("error during write");
+                               }
+                            }*/
+                        }
+                        Err(_) => {
+                            defmt::println!("error during read");
+                        }
+                    }
+                });
+            }
         }
+    }
+}
 
-        display.clear();
-        for (x, v) in buffer.iter().enumerate() {
-            let y = *v as u32 / 128;
-            display.set_pixel(x as u32, y, true);
-        }
 
-        display.flush().unwrap();
+
+fn handle_authenticate<E, SPI, NSS, D, F>(
+    mfrc522: &mut Mfrc522<SPI, NSS, D, Initialized>,
+    uid: &mfrc522::Uid,
+    action: F,
+) where
+    SPI: SpiTransfer<u8, Error = E> + SpiWrite<u8, Error = E>,
+    Mfrc522<SPI, NSS, D, Initialized>: WithNssDelay,
+    F: FnOnce(&mut Mfrc522<SPI, NSS, D, Initialized>) -> (),
+{
+    let key = [0xFF; 6];
+    if mfrc522.mf_authenticate(uid, 1, &key).is_ok() {
+        action(mfrc522);
+    } else {
+        defmt::println!("Could not authenticate");
+    }
+
+    if mfrc522.hlta().is_err() {
+        defmt::println!("Could not halt");
+    }
+    if mfrc522.stop_crypto1().is_err() {
+        defmt::println!("Could not disable crypto1");
     }
 }
