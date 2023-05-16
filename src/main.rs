@@ -28,7 +28,12 @@ fn main() -> ! {
 
     // Freeze the configuration of all the clocks in the system and store the frozen frequencies in
     // `clocks`
-    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let clocks = rcc.cfgr
+        .sysclk(72.MHz())
+        .hclk(72.MHz())
+        .pclk1(36.MHz())
+        .pclk2(72.MHz())
+        .freeze(&mut flash.acr);
 
     let mut afio = device.AFIO.constrain();
 
