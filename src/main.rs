@@ -23,7 +23,7 @@ mod app {
     type MyMono = Systick<100>; // 100 Hz / 10 ms granularity
 
     const FRAME_SIZE: usize = 1024;
-    const TIMER_FREQ: usize = 1024 * 16;
+    const TIMER_FREQ: usize = FRAME_SIZE * 16;
 
     // Resources shared between tasks
     #[shared]
