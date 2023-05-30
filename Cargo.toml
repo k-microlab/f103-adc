@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 embedded-hal = { features = ["unproven"], version = "0.2.7" }
+embedded-sdmmc = { path = "embedded-sdmmc-rs", default-features = false, features = ["defmt-log"] }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rtic = "1.1.4"
 systick-monotonic = "1.0.1"
@@ -26,3 +27,9 @@ features = ["stm32f103", "rt"]
 
 [profile.release]
 lto = true
+strip = false
+
+[workspace]
+members = [
+    "embedded-sdmmc-rs"
+]

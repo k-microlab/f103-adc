@@ -1,4 +1,5 @@
 /.idea
 /target
+/embedded-sdmmc-rs
 *.iml
 Cargo.lock

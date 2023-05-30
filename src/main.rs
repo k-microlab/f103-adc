@@ -9,6 +9,8 @@ use panic_probe as _;
 
 #[rtic::app(device = hal::pac, dispatchers = [SPI1])]
 mod app {
+    use embedded_hal::spi::{Mode, Phase, Polarity};
+    use embedded_sdmmc::{SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
     use systick_monotonic::*; // Implements the `Monotonic` trait
 
     use hal::prelude::*;
@@ -16,33 +18,33 @@ mod app {
     use hal::gpio::{Alternate, Analog, PB11, Pin};
     use hal::pac::{ADC1, TIM2, USART3};
     use hal::serial::{Config, Serial, TxDma3};
-    use hal::timer::{CounterHz, Event, Timer};
+    use hal::spi::Spi;
+    use hal::timer::{CounterHz, Event, Pwm, Timer};
 
     // A monotonic timer to enable scheduling in RTIC
     #[monotonic(binds = SysTick, default = true)]
     type MyMono = Systick<100>; // 100 Hz / 10 ms granularity
 
-    const FRAME_SIZE: usize = 1024;
-    const TIMER_FREQ: usize = FRAME_SIZE * 16;
+
+    pub const MODE: Mode = Mode {
+        polarity: Polarity::IdleLow,
+        phase: Phase::CaptureOnFirstTransition,
+    };
+
 
     // Resources shared between tasks
     #[shared]
     struct Shared {
-        exchange: &'static mut [u16; FRAME_SIZE]
+
     }
 
     // Local resources to specific tasks (cannot be shared)
     #[local]
     struct Local {
-        timer: CounterHz<TIM2>,
-        adc: Adc<ADC1>,
-        channels: (Pin<'A', 0, Analog>,),
-        serial: Option<TxDma3>
+
     }
 
-    #[init(local = [
-        exchange: [u16; FRAME_SIZE] = [0; FRAME_SIZE]
-    ])]
+    #[init(local = [])]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         // Get access to the core peripherals from the cortex-m crate
         let core = cx.core;
@@ -59,7 +61,7 @@ mod app {
         // Freeze the configuration of all the clocks in the system and store the frozen frequencies in
         // `clocks`
         let clocks = rcc.cfgr
-            .sysclk(72.MHz())
+            .sysclk(48.MHz()) // Delay timer crash on 72 MHz
             .use_hse(8.MHz())
             .hclk(72.MHz())
             .pclk1(36.MHz())
@@ -77,36 +79,61 @@ mod app {
         let mut gpioa = device.GPIOA.split();
         let mut gpiob = device.GPIOB.split();
 
-        let dma = device.DMA1.split();
-        let mut dma_ch1 = dma.1;
-        let mut dma_ch2 = dma.2;
+        let sck = gpioa.pa5.into_alternate_push_pull(&mut gpioa.crl);
+        let miso = gpioa.pa6;
+        let mosi = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
+        defmt::println!("SPI init");
+        let spi = Spi::spi1(
+            device.SPI1,
+            (sck, miso, mosi),
+            &mut afio.mapr,
+            MODE,
+            1024.kHz(),
+            clocks,
+        );
+        let nss = gpioa.pa4.into_push_pull_output(&mut gpioa.crl);
 
-        let mut adc = Adc::adc1(device.ADC1, clocks);
-        adc.set_sample_time(SampleTime::T_13);
+        defmt::println!("Timer init");
+        let delay = device.TIM1.delay_ms(&clocks);
 
-        let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
-        let rx = gpiob.pb11;
-        let mut sc = Config::default();
-        sc.baudrate = 1024000.bps();
+        defmt::println!("SdCard init");
+        let mut sd = SdCard::new(spi, nss, delay);
 
-        let serial = Serial::new(device.USART3, (tx, rx), &mut afio.mapr, sc, &clocks);
-        let (tx, rx) = serial.split();
-        let tx = tx.with_dma(dma_ch2);
+        let size = sd.num_bytes().unwrap();
 
-        let mut timer = Timer::new(device.TIM2, &clocks).counter_hz();
-        timer.start((TIMER_FREQ as u32).Hz()).unwrap();
-        timer.listen(Event::Update);
+        defmt::println!("Card size: {} GB", size / 1024 / 1024);
 
-        // Configure pa0 as an analog input
-        let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
-        let mut adc_ch1 = gpioa.pa1.into_analog(&mut gpioa.crl);
-        let mut adc_ch2 = gpioa.pa2.into_analog(&mut gpioa.crl);
+        let mut vm = VolumeManager::new(sd, Time);
+        let mut volume = vm.get_volume(VolumeIdx(0)).unwrap();
+
+        let root = vm.open_root_dir(&volume).unwrap();
+        let mut buffer = [0u8; 256];
+
+        vm.iterate_dir(&volume, &root, |entry, lfn| {
+            let lfn = lfn.map(|chars| {
+                let mut tmp = [0u8; 4];
+                let mut len = 0;
+                for c in chars {
+                    for b in c.encode_utf8(&mut tmp).as_bytes() {
+                        buffer[len] = *b;
+                        len += 1;
+                    }
+                }
+                unsafe { core::str::from_utf8_unchecked(&buffer[..len]) }
+            });
+            if entry.attributes.is_directory() {
+                defmt::println!("Dir: {:?}", lfn);
+            } else {
+                defmt::println!("File: {:?}", lfn);
+            }
+            // defmt::println!("Entry: {}", core::str::from_utf8(entry.name.base_name()).unwrap());
+        }).unwrap();
 
         (
             // Initialization of shared resources
-            Shared { exchange: cx.local.exchange },
+            Shared {},
             // Initialization of task local resources
-            Local { timer, adc, channels: (adc_ch0,), serial: Some(tx) },
+            Local {},
             // Move the monotonic timer to the RTIC run-time, this enables
             // scheduling
             init::Monotonics(mono),
@@ -121,54 +148,18 @@ mod app {
         }
     }
 
-    #[task(binds = TIM2, priority = 3, local = [
-        timer, adc, channels,
-        buffer: [u16; FRAME_SIZE] = [0; FRAME_SIZE],
-        cursor: usize = 0
-    ], shared = [exchange])]
-    fn timer_tick(mut cx: timer_tick::Context) {
-        let timer = cx.local.timer;
-        timer.clear_interrupt(Event::Update);
+    pub struct Time;
 
-        let adc = cx.local.adc;
-        let channels = cx.local.channels;
-
-        let reading: u16 = nb::block!(adc.read(&mut channels.0)).unwrap();
-        let reading = (reading as u32 * 3300 / 4096) as u16;
-
-        // defmt::println!("read {}", reading);
-
-        let cursor = cx.local.cursor;
-        let buffer = cx.local.buffer;
-
-        buffer[*cursor] = reading;
-        *cursor += 1;
-        if *cursor >= FRAME_SIZE {
-            *cursor = 0;
-            cx.shared.exchange.lock(|b| {
-                core::mem::swap(buffer, b);
-            });
-            send::spawn().unwrap();
+    impl TimeSource for Time {
+        fn get_timestamp(&self) -> Timestamp {
+            Timestamp {
+                year_since_1970: 0,
+                zero_indexed_month: 0,
+                zero_indexed_day: 0,
+                hours: 0,
+                minutes: 0,
+                seconds: 0,
+            }
         }
-    }
-
-    #[task(local = [
-        serial,
-        buffer: [u16; FRAME_SIZE] = [0; FRAME_SIZE]
-    ], shared = [exchange])]
-    fn send(mut cx: send::Context) {
-        let serial = cx.local.serial.take().unwrap();
-        let buffer = cx.local.buffer;
-
-        cx.shared.exchange.lock(|b| {
-            core::mem::swap(buffer, b);
-        });
-
-        // defmt::println!("tx start");
-        let transfer = serial.write(unsafe { core::mem::transmute::<_, &mut [u8; 2 * FRAME_SIZE]>(buffer) });
-        let (_, serial) = transfer.wait();
-        // defmt::println!("tx done");
-
-        let _ = cx.local.serial.insert(serial);
     }
 }
