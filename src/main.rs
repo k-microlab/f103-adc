@@ -4,12 +4,13 @@
 
 extern crate stm32f1xx_hal as hal;
 
-use panic_rtt as _;
+use panic_abort as _;
 
 use hal::prelude::*;
 use hal::spi::Spi;
 use embedded_sdmmc::{SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use embedded_hal::spi::{Mode, Phase, Polarity};
+use embedded_sdmmc::sdcard::AcquireOpts;
 
 pub const MODE: Mode = Mode {
     polarity: Polarity::IdleLow,
@@ -59,7 +60,7 @@ fn main() -> ! {
         (sck, miso, mosi),
         &mut afio.mapr,
         MODE,
-        1024.kHz(),
+        400.kHz(),
         clocks,
     );
     let nss = gpioa.pa4.into_push_pull_output(&mut gpioa.crl);
@@ -67,12 +68,14 @@ fn main() -> ! {
     // defmt::println!("Timer init");
     let delay = device.TIM1.delay_ms(&clocks);
 
-    // defmt::println!("SdCard init");
-    let mut sd = SdCard::new(spi, nss, delay);
+    defmt::println!("SdCard init");
+    let mut sd = SdCard::new_with_options(spi, nss, delay, AcquireOpts {
+        use_crc: false,
+    });
 
     let size = sd.num_bytes().unwrap();
 
-    // defmt::println!("Card size: {} GB", size / 1024 / 1024);
+    defmt::println!("Card size: {} GB", size / 1024 / 1024);
 
     let mut vm = VolumeManager::new(sd, Time);
     let mut volume = vm.get_volume(VolumeIdx(0)).unwrap();
