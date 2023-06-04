@@ -1,10 +1,12 @@
+#![feature(panic_info_message)]
 // #![deny(unsafe_code)]
 #![no_std]
 #![no_main]
 
 extern crate stm32f1xx_hal as hal;
 
-use panic_abort as _;
+use defmt_rtt as _;
+use panic_probe as _;
 
 use hal::prelude::*;
 use hal::spi::Spi;
@@ -53,14 +55,14 @@ fn main() -> ! {
     let miso = gpioa.pa6;
     let mosi = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
 
-    // defmt::println!("SPI init");
+    defmt::println!("SPI init");
 
     let spi = Spi::spi1(
         device.SPI1,
         (sck, miso, mosi),
         &mut afio.mapr,
         MODE,
-        400.kHz(),
+        1.MHz(),
         clocks,
     );
     let nss = gpioa.pa4.into_push_pull_output(&mut gpioa.crl);
@@ -69,16 +71,16 @@ fn main() -> ! {
     let delay = device.TIM1.delay_ms(&clocks);
 
     defmt::println!("SdCard init");
-    let mut sd = SdCard::new_with_options(spi, nss, delay, AcquireOpts {
+    let sd = SdCard::new_with_options(spi, nss, delay, AcquireOpts {
         use_crc: false,
     });
 
     let size = sd.num_bytes().unwrap();
 
-    defmt::println!("Card size: {} GB", size / 1024 / 1024);
+    defmt::println!("Card size: {} GB", size);
 
     let mut vm = VolumeManager::new(sd, Time);
-    let mut volume = vm.get_volume(VolumeIdx(0)).unwrap();
+    let volume = vm.get_volume(VolumeIdx(0)).unwrap();
 
     let root = vm.open_root_dir(&volume).unwrap();
     let mut buffer = [0u8; 256];
@@ -96,12 +98,14 @@ fn main() -> ! {
             unsafe { core::str::from_utf8_unchecked(&buffer[..len]) }
         });
         if entry.attributes.is_directory() {
-            // defmt::println!("Dir: {:?}", lfn);
+            defmt::println!("Dir: {:?}", lfn);
         } else {
-            // defmt::println!("File: {:?}", lfn);
+            defmt::println!("File: {:?}", lfn);
         }
-        // defmt::println!("Entry: {}", core::str::from_utf8(entry.name.base_name()).unwrap());
+        defmt::println!("Entry: {}", core::str::from_utf8(entry.name.base_name()).unwrap());
     }).unwrap();
+    
+    defmt::println!("DONE");
 
     loop {
         cortex_m::asm::wfi();
