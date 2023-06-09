@@ -1,127 +1,91 @@
-// #![deny(unsafe_code)]
 #![no_std]
 #![no_main]
 
-use defmt_rtt as _;
 use panic_probe as _;
+use defmt_rtt as _;
 
-use cortex_m::singleton;
-use cortex_m_rt::entry;
-use stm32f1xx_hal::{pac, prelude::*};
-
-use stm32f1xx_hal::adc::{Adc, SampleTime};
-use stm32f1xx_hal::serial::{Config, Serial};
+use cortex_m_rt::{entry, exception, ExceptionFrame};
+use embedded_graphics::{geometry::Point, image::Image, pixelcolor::Rgb565, prelude::*};
+use panic_semihosting as _;
+use ssd1331::{DisplayRotation, Ssd1331};
+use stm32f1xx_hal::{
+    prelude::*,
+    spi::{Mode, Phase, Polarity, Spi},
+    stm32,
+};
+use tinybmp::Bmp;
 
 #[entry]
 fn main() -> ! {
-    // Get access to the core peripherals from the cortex-m crate
-    let core = cortex_m::Peripherals::take().unwrap();
-    // Get access to the device specific peripherals from the peripheral access crate
-    let device = pac::Peripherals::take().unwrap();
+    let cp = cortex_m::Peripherals::take().unwrap();
+    let dp = stm32::Peripherals::take().unwrap();
+    let mut flash = dp.FLASH.constrain();
+    let mut rcc = dp.RCC.constrain();
+    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let mut afio = dp.AFIO.constrain(&mut rcc.apb2);
+    let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
+    let mut gpiob = dp.GPIOB.split(&mut rcc.apb2);
 
-    // Take ownership over the raw flash and rcc devices and convert them into the corresponding
-    // HAL structs
-    let mut flash = device.FLASH.constrain();
-    let rcc = device.RCC.constrain();
+    // SPI1
+    let sck = gpioa.pa5.into_alternate_push_pull(&mut gpioa.crl);
+    let miso = gpioa.pa6;
+    let mosi = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
+    let mut delay = cp.SYST.delay(&clocks);
+    let mut rst = gpiob.pb0.into_push_pull_output(&mut gpiob.crl);
+    let dc = gpiob.pb1.into_push_pull_output(&mut gpiob.crl);
 
-    defmt::info!("Loading");
+    let spi = Spi::spi1(
+        dp.SPI1,
+        (sck, miso, mosi),
+        &mut afio.mapr,
+        Mode {
+            polarity: Polarity::IdleLow,
+            phase: Phase::CaptureOnFirstTransition,
+        },
+        8.mhz(),
+        clocks
+    );
 
-    // Freeze the configuration of all the clocks in the system and store the frozen frequencies in
-    // `clocks`
-    let clocks = rcc.cfgr
-        .sysclk(72.MHz())
-        .hclk(72.MHz())
-        .pclk1(36.MHz())
-        .pclk2(72.MHz())
-        .freeze(&mut flash.acr);
+    let mut disp = Ssd1331::new(spi, dc, DisplayRotation::Rotate0);
 
-    let mut afio = device.AFIO.constrain();
+    disp.reset(&mut rst, &mut delay).unwrap();
+    disp.init().unwrap();
+    disp.flush().unwrap();
 
-    /*// Acquire the GPIOC peripheral
-    let mut gpioc = dp.GPIOC.split();
+    let (w, h) = disp.dimensions();
 
-    // Configure gpio C pin 13 as a push-pull output. The `crh` register is passed to the function
-    // in order to configure the port. For pins 0-7, crl should be passed instead.
-    let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
-    // Configure the syst timer to trigger an update every second
-    let mut timer = Timer::syst(cp.SYST, &clocks).counter_hz();
-    timer.start(1.Hz()).unwrap();
+    let bmp =
+        Bmp::from_slice(include_bytes!("./rust-pride.bmp")).expect("Failed to load BMP image");
 
-    // Wait for the timer to trigger an update and change the state of the LED
-    loop {
-        block!(timer.wait()).unwrap();
-        led.set_high();
-        block!(timer.wait()).unwrap();
-        led.set_low();
-    }*/
+    let im: Image<Bmp<Rgb565>> = Image::new(&bmp, Point::zero());
 
-    // Setup pins
-    let mut gpioa = device.GPIOA.split();
-    let mut gpiob = device.GPIOB.split();
+    // Position image in the center of the display
+    let moved = im.translate(Point::new(
+        (w as u32 - bmp.size().width) as i32 / 2,
+        (h as u32 - bmp.size().height) as i32 / 2,
+    ));
 
-    let dma = device.DMA1.split();
-    let mut dma_ch1 = dma.1;
-    let mut dma_ch2 = dma.2;
+    moved.draw(&mut disp).unwrap();
 
-    let mut adc = Adc::adc1(device.ADC1, clocks);
-    adc.set_sample_time(SampleTime::T_1);
+    disp.flush().unwrap();
 
-    let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
-    let rx = gpiob.pb11;
-    let mut sc = Config::default();
-    sc.baudrate = 256000.bps();
+    loop {}
+}
 
-    let mut serial = Serial::new(device.USART3, (tx, rx), &mut afio.mapr, sc, &clocks);
+#[exception]
+fn HardFault(ef: &ExceptionFrame) -> ! {
+    panic!("{:#?}", ef);
+}
 
-    // Configure pa0 as an analog input
-    let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
+/// Size information for the common 96x16 variants
+#[derive(Debug, Copy, Clone)]
+pub struct DisplaySize96x64;
+impl DisplaySize for DisplaySize96x64 {
+    const WIDTH: u8 = 96;
+    const HEIGHT: u8 = 64;
+    type Buffer = [u8; Self::WIDTH as usize * Self::HEIGHT as usize / 8];
 
-    // let mut timer = dp.TIM3.delay_us(&clocks);
-
-    let mut buffer = singleton!(: [u16; 1024] = [0; 1024]).unwrap().as_mut_slice();
-    let mut sending = singleton!(: [u16; 1024] = [0; 1024]).unwrap().as_mut_slice();
-
-    defmt::info!("vref");
-
-    let vref = adc.read_vref();
-
-    defmt::info!("measure");
-
-    loop {
-        let val: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        serial.bwrite_all(val.to_ne_bytes().as_slice()).unwrap();
-    }
-
-    let (mut s_tx, _) = serial.split();
-
-    loop {
-        let v: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        if v > 500 / vref {
-            let adc_dma = adc.with_dma(adc_ch0, dma_ch1);
-
-            let (buf, adc_dma) = adc_dma.read(buffer).wait();
-
-            for c in &mut *buf {
-                *c = v;
-            }
-
-            let dma_tx = s_tx.with_dma(dma_ch2);
-
-            let (buf, tx_dma) = dma_tx.write(bytemuck::cast_slice_mut::<u16, u8>(buf)).wait();
-
-            let (tx, tch) = tx_dma.release();
-
-            // Consumes the AdcDma struct, restores adc configuration to previous state and returns the
-            // Adc struct in normal mode.
-            let (a, ach, dch) = adc_dma.split();
-
-            adc = a;
-            adc_ch0 = ach;
-            dma_ch1 = dch;
-            dma_ch2 = tch;
-            buffer = bytemuck::cast_slice_mut::<u8, u16>(buf);
-            s_tx = tx;
-            // timer.delay_us(297)
-        }
+    fn configure(&self, iface: &mut impl WriteOnlyDataCommand) -> Result<(), DisplayError> {
+        Command::ComPinConfig(false, false).send(iface)
     }
 }
