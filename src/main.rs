@@ -1,4 +1,3 @@
-#![feature(panic_info_message)]
 // #![deny(unsafe_code)]
 #![no_std]
 #![no_main]
@@ -10,9 +9,10 @@ use panic_probe as _;
 
 use hal::prelude::*;
 use hal::spi::Spi;
-use embedded_sdmmc::{SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use embedded_hal::spi::{Mode, Phase, Polarity};
-use embedded_sdmmc::sdcard::AcquireOpts;
+use crate::ad770x::{AD770x, Channel, ChannelConfig};
+
+mod ad770x;
 
 pub const MODE: Mode = Mode {
     polarity: Polarity::IdleLow,
@@ -70,59 +70,21 @@ fn main() -> ! {
     // defmt::println!("Timer init");
     let delay = device.TIM1.delay_ms(&clocks);
 
-    defmt::println!("SdCard init");
-    let sd = SdCard::new_with_options(spi, nss, delay, AcquireOpts {
-        use_crc: false,
-    });
+    defmt::println!("ADC init");
+    let mut ad = AD770x::new(spi, nss);
 
-    let size = sd.num_bytes().unwrap();
+    ad.reset();
+    ad.init(Channel::AIN1, ChannelConfig::default());
+    ad.init(Channel::AIN2, ChannelConfig::default());
 
-    defmt::println!("Card size: {} GB", size);
+    defmt::println!("Init done");
 
-    let mut vm = VolumeManager::new(sd, Time);
-    let volume = vm.get_volume(VolumeIdx(0)).unwrap();
+    let r = ad.read(Channel::AIN1);
+    defmt::println!("Reading: {}", r);
 
-    let root = vm.open_root_dir(&volume).unwrap();
-    let mut buffer = [0u8; 256];
-
-    vm.iterate_dir(&volume, &root, |entry, lfn| {
-        let lfn = lfn.map(|chars| {
-            let mut tmp = [0u8; 4];
-            let mut len = 0;
-            for c in chars {
-                for b in c.encode_utf8(&mut tmp).as_bytes() {
-                    buffer[len] = *b;
-                    len += 1;
-                }
-            }
-            unsafe { core::str::from_utf8_unchecked(&buffer[..len]) }
-        });
-        if entry.attributes.is_directory() {
-            defmt::println!("Dir: {:?}", lfn);
-        } else {
-            defmt::println!("File: {:?}", lfn);
-        }
-        defmt::println!("Entry: {}", core::str::from_utf8(entry.name.base_name()).unwrap());
-    }).unwrap();
-    
     defmt::println!("DONE");
 
     loop {
         cortex_m::asm::wfi();
-    }
-}
-
-pub struct Time;
-
-impl TimeSource for Time {
-    fn get_timestamp(&self) -> Timestamp {
-        Timestamp {
-            year_since_1970: 0,
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-        }
     }
 }

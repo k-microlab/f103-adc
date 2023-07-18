@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 embedded-hal = { features = ["unproven"], version = "0.2.7" }
-embedded-sdmmc = { path = "embedded-sdmmc-rs", default-features = false, features = ["defmt-log"] }
 cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.3"
 nb = "1"
@@ -28,8 +27,3 @@ debug = 2
 
 [profile.dev]
 lto = true
-
-[workspace]
-members = [
-    "embedded-sdmmc-rs"
-]
