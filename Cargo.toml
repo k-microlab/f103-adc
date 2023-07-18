@@ -26,3 +26,4 @@ features = ["stm32f103", "rt"]
 
 [profile.release]
 lto = true
+debug = 2
