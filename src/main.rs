@@ -33,7 +33,10 @@ fn main() -> ! {
         .hclk(72.MHz())
         .pclk1(36.MHz())
         .pclk2(72.MHz())
+        .adcclk(12.MHz())
         .freeze(&mut flash.acr);
+
+    defmt::info!("Clocks done");
 
     let mut afio = device.AFIO.constrain();
 
@@ -69,12 +72,13 @@ fn main() -> ! {
     let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
     let rx = gpiob.pb11;
     let mut sc = Config::default();
-    sc.baudrate = 256000.bps();
+    sc.baudrate = 1024000.bps();
 
     let mut serial = Serial::new(device.USART3, (tx, rx), &mut afio.mapr, sc, &clocks);
 
     // Configure pa0 as an analog input
     let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
+    let mut adc_ch1 = gpioa.pa1.into_analog(&mut gpioa.crl);
 
     // let mut timer = dp.TIM3.delay_us(&clocks);
 
@@ -85,11 +89,17 @@ fn main() -> ! {
 
     let vref = adc.read_vref();
 
-    defmt::info!("measure");
+    defmt::info!("measured {:?}", vref);
 
     loop {
-        let val: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        serial.bwrite_all(val.to_ne_bytes().as_slice()).unwrap();
+        let v0: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
+        let v0 = v0 as i32 * 3300 / 4096 * 5000 / 3000;
+        let v1: u16 = nb::block!(adc.read(&mut adc_ch1)).unwrap();
+        let v1 = v1 as i32 * 3300 / 4096 * 1745 / 1000;
+        let v2: i32 = (v0 - v1);
+        serial.bwrite_all((v0 as i16).to_ne_bytes().as_slice()).unwrap();
+        serial.bwrite_all((-(v1 as i16)).to_ne_bytes().as_slice()).unwrap();
+        serial.bwrite_all((v2 as i16).to_ne_bytes().as_slice()).unwrap();
     }
 
     let (mut s_tx, _) = serial.split();
