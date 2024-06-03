@@ -69,12 +69,12 @@ fn main() -> ! {
     let mut adc = Adc::adc1(device.ADC1, clocks);
     adc.set_sample_time(SampleTime::T_1);
 
-    let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
-    let rx = gpiob.pb11;
+    let tx = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
+    let rx = gpioa.pa10;
     let mut sc = Config::default();
-    sc.baudrate = 1024000.bps();
+    sc.baudrate = 3000000.bps();
 
-    let mut serial = Serial::new(device.USART3, (tx, rx), &mut afio.mapr, sc, &clocks);
+    let mut serial = Serial::new(device.USART1, (tx, rx), &mut afio.mapr, sc, &clocks);
 
     // Configure pa0 as an analog input
     let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
@@ -100,38 +100,5 @@ fn main() -> ! {
         serial.bwrite_all((v0 as i16).to_ne_bytes().as_slice()).unwrap();
         serial.bwrite_all((-(v1 as i16)).to_ne_bytes().as_slice()).unwrap();
         serial.bwrite_all((v2 as i16).to_ne_bytes().as_slice()).unwrap();
-    }
-
-    let (mut s_tx, _) = serial.split();
-
-    loop {
-        let v: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        if v > 500 / vref {
-            let adc_dma = adc.with_dma(adc_ch0, dma_ch1);
-
-            let (buf, adc_dma) = adc_dma.read(buffer).wait();
-
-            for c in &mut *buf {
-                *c = v;
-            }
-
-            let dma_tx = s_tx.with_dma(dma_ch2);
-
-            let (buf, tx_dma) = dma_tx.write(bytemuck::cast_slice_mut::<u16, u8>(buf)).wait();
-
-            let (tx, tch) = tx_dma.release();
-
-            // Consumes the AdcDma struct, restores adc configuration to previous state and returns the
-            // Adc struct in normal mode.
-            let (a, ach, dch) = adc_dma.split();
-
-            adc = a;
-            adc_ch0 = ach;
-            dma_ch1 = dch;
-            dma_ch2 = tch;
-            buffer = bytemuck::cast_slice_mut::<u8, u16>(buf);
-            s_tx = tx;
-            // timer.delay_us(297)
-        }
     }
 }
