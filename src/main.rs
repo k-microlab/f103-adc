@@ -84,46 +84,10 @@ fn main() -> ! {
 
     let mut delay = device.TIM1.delay_us(&clocks);
 
-    let mut rx = nrf24.rx().unwrap();
-
-    const CHANNELS: usize = 126;
+    let mut tx = nrf24.tx().unwrap();
 
     loop {
-        let mut buf = [0u8; CHANNELS];
-
-        let payload = rx.read().unwrap();
-        for chan in 0..CHANNELS {
-            buf[chan] = HEX[chan >> 4];
-        }
-        defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
-        for chan in 0..CHANNELS {
-            buf[chan] = HEX[chan & 0xf];
-        }
-        defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
-        loop {
-            let mut noise = [0u8; CHANNELS];
-            for i in 0..100 {
-                for chan in 0..CHANNELS {
-                    rx.set_frequency(chan as u8).unwrap();
-                    rx.set_pipes_rx_enable(&[true; 6]).unwrap();
-                    delay.delay_us(128u32);
-                    rx.set_pipes_rx_enable(&[false; 6]).unwrap();
-                    if rx.has_carrier().unwrap() {
-                        noise[chan] += 1;
-                    }
-                }
-            }
-            for chan in 0..CHANNELS {
-                buf[chan] = HEX[noise[chan] as usize & 0xf];
-            }
-            defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
-        }
-    }
-
-    /*let mut tx = nrf24.tx().unwrap();
-
-    loop {
-        tx.send(b"CRAP").unwrap();
+        tx.send(b"Hello, World!").unwrap();
         tx.wait_empty().unwrap();
-    }*/
+    }
 }
