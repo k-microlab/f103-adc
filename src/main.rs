@@ -5,12 +5,16 @@
 use defmt_rtt as _;
 use panic_probe as _;
 
-use cortex_m::singleton;
 use cortex_m_rt::entry;
+use embedded_hal::spi;
+use embedded_nrf24l01::{Configuration, CrcMode, DataRate, NRF24L01};
 use stm32f1xx_hal::{pac, prelude::*};
 
-use stm32f1xx_hal::adc::{Adc, SampleTime};
 use stm32f1xx_hal::serial::{Config, Serial};
+use stm32f1xx_hal::spi::Spi;
+
+const ADDR: &[u8; 5] = b"1Node";
+const HEX: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D', b'E', b'F'];
 
 #[entry]
 fn main() -> ! {
@@ -40,65 +44,86 @@ fn main() -> ! {
 
     let mut afio = device.AFIO.constrain();
 
-    /*// Acquire the GPIOC peripheral
-    let mut gpioc = dp.GPIOC.split();
-
-    // Configure gpio C pin 13 as a push-pull output. The `crh` register is passed to the function
-    // in order to configure the port. For pins 0-7, crl should be passed instead.
-    let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
-    // Configure the syst timer to trigger an update every second
-    let mut timer = Timer::syst(cp.SYST, &clocks).counter_hz();
-    timer.start(1.Hz()).unwrap();
-
-    // Wait for the timer to trigger an update and change the state of the LED
-    loop {
-        block!(timer.wait()).unwrap();
-        led.set_high();
-        block!(timer.wait()).unwrap();
-        led.set_low();
-    }*/
-
     // Setup pins
     let mut gpioa = device.GPIOA.split();
     let mut gpiob = device.GPIOB.split();
 
-    let dma = device.DMA1.split();
-    let mut dma_ch1 = dma.1;
-    let mut dma_ch2 = dma.2;
-
-    let mut adc = Adc::adc1(device.ADC1, clocks);
-    adc.set_sample_time(SampleTime::T_1);
-
     let tx = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
     let rx = gpioa.pa10;
     let mut sc = Config::default();
-    sc.baudrate = 3000000.bps();
+    sc.baudrate = 115200.bps();
 
     let mut serial = Serial::new(device.USART1, (tx, rx), &mut afio.mapr, sc, &clocks);
+    defmt::info!("Serial done");
 
-    // Configure pa0 as an analog input
-    let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
-    let mut adc_ch1 = gpioa.pa1.into_analog(&mut gpioa.crl);
+    let ce = gpioa.pa4.into_push_pull_output(&mut gpioa.crl);
+    let sck = gpioa.pa5.into_alternate_push_pull(&mut gpioa.crl);
+    let mi = gpioa.pa6.into_pull_up_input(&mut gpioa.crl);
+    let mo = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
+    let csn = gpiob.pb0.into_push_pull_output(&mut gpiob.crl);
+    let spi = Spi::spi1(device.SPI1, (sck, mi, mo), &mut afio.mapr, spi::MODE_0, 10.MHz(), clocks);
+    defmt::info!("Spi done");
 
-    // let mut timer = dp.TIM3.delay_us(&clocks);
+    let mut nrf24 = NRF24L01::new(ce, csn, spi).unwrap();
+    nrf24.set_frequency(76).unwrap();
+    nrf24.set_auto_retransmit(5, 15).unwrap();
+    nrf24.set_rf(&DataRate::R1Mbps, 3).unwrap();
+    nrf24
+        .set_pipes_rx_enable(&[true, false, false, false, false, false])
+        .unwrap();
+    nrf24
+        .set_auto_ack(&[true, true, true, true, true, true])
+        .unwrap();
+    nrf24.set_pipes_rx_lengths(&[Some(32); 6]).unwrap();
+    nrf24.set_crc(CrcMode::OneByte).unwrap();
+    nrf24.set_rx_addr(1, ADDR).unwrap();
+    nrf24.set_tx_addr(ADDR).unwrap();
+    nrf24.flush_rx().unwrap();
+    nrf24.flush_tx().unwrap();
+    defmt::info!("NRF done, freq = {:?} ({})", nrf24.get_frequency().unwrap(), 76);
 
-    let mut buffer = singleton!(: [u16; 1024] = [0; 1024]).unwrap().as_mut_slice();
-    let mut sending = singleton!(: [u16; 1024] = [0; 1024]).unwrap().as_mut_slice();
+    let mut delay = device.TIM1.delay_us(&clocks);
 
-    defmt::info!("vref");
+    let mut rx = nrf24.rx().unwrap();
 
-    let vref = adc.read_vref();
-
-    defmt::info!("measured {:?}", vref);
+    const CHANNELS: usize = 126;
 
     loop {
-        let v0: u16 = nb::block!(adc.read(&mut adc_ch0)).unwrap();
-        let v0 = v0 as i32 * 3300 / 4096 * 5000 / 3000;
-        let v1: u16 = nb::block!(adc.read(&mut adc_ch1)).unwrap();
-        let v1 = v1 as i32 * 3300 / 4096 * 1745 / 1000;
-        let v2: i32 = (v0 - v1);
-        serial.bwrite_all((v0 as i16).to_ne_bytes().as_slice()).unwrap();
-        serial.bwrite_all((-(v1 as i16)).to_ne_bytes().as_slice()).unwrap();
-        serial.bwrite_all((v2 as i16).to_ne_bytes().as_slice()).unwrap();
+        let mut buf = [0u8; CHANNELS];
+
+        let payload = rx.read().unwrap();
+        for chan in 0..CHANNELS {
+            buf[chan] = HEX[chan >> 4];
+        }
+        defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
+        for chan in 0..CHANNELS {
+            buf[chan] = HEX[chan & 0xf];
+        }
+        defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
+        loop {
+            let mut noise = [0u8; CHANNELS];
+            for i in 0..100 {
+                for chan in 0..CHANNELS {
+                    rx.set_frequency(chan as u8).unwrap();
+                    rx.set_pipes_rx_enable(&[true; 6]).unwrap();
+                    delay.delay_us(128u32);
+                    rx.set_pipes_rx_enable(&[false; 6]).unwrap();
+                    if rx.has_carrier().unwrap() {
+                        noise[chan] += 1;
+                    }
+                }
+            }
+            for chan in 0..CHANNELS {
+                buf[chan] = HEX[noise[chan] as usize & 0xf];
+            }
+            defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
+        }
     }
+
+    /*let mut tx = nrf24.tx().unwrap();
+
+    loop {
+        tx.send(b"CRAP").unwrap();
+        tx.wait_empty().unwrap();
+    }*/
 }
