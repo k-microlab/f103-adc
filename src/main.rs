@@ -9,12 +9,13 @@ use cortex_m_rt::entry;
 use embedded_hal::spi;
 use embedded_nrf24l01::{Configuration, CrcMode, DataRate, NRF24L01};
 use stm32f1xx_hal::{pac, prelude::*};
+use stm32f1xx_hal::gpio::PinState;
+use stm32f1xx_hal::i2c::{BlockingI2c, DutyCycle, Mode};
 
 use stm32f1xx_hal::serial::{Config, Serial};
 use stm32f1xx_hal::spi::Spi;
 
-const ADDR: &[u8; 5] = b"1Node";
-const HEX: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D', b'E', b'F'];
+mod max30100;
 
 #[entry]
 fn main() -> ! {
@@ -42,6 +43,8 @@ fn main() -> ! {
 
     defmt::info!("Clocks done");
 
+    let mut delay = core.SYST.delay(&clocks);
+
     let mut afio = device.AFIO.constrain();
 
     // Setup pins
@@ -51,79 +54,44 @@ fn main() -> ! {
     let tx = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
     let rx = gpioa.pa10;
     let mut sc = Config::default();
-    sc.baudrate = 115200.bps();
+    sc.baudrate = 1024000.bps();
 
     let mut serial = Serial::new(device.USART1, (tx, rx), &mut afio.mapr, sc, &clocks);
     defmt::info!("Serial done");
 
-    let ce = gpioa.pa4.into_push_pull_output(&mut gpioa.crl);
-    let sck = gpioa.pa5.into_alternate_push_pull(&mut gpioa.crl);
-    let mi = gpioa.pa6.into_pull_up_input(&mut gpioa.crl);
-    let mo = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
-    let csn = gpiob.pb0.into_push_pull_output(&mut gpiob.crl);
-    let spi = Spi::spi1(device.SPI1, (sck, mi, mo), &mut afio.mapr, spi::MODE_0, 10.MHz(), clocks);
-    defmt::info!("Spi done");
+    let rd = gpiob.pb11.into_push_pull_output_with_state(&mut gpiob.crh, PinState::High);
+    let ird = gpiob.pb10.into_push_pull_output_with_state(&mut gpiob.crh, PinState::High);
+    let scl = gpiob.pb8.into_alternate_open_drain(&mut gpiob.crh);
+    let sda = gpiob.pb9.into_alternate_open_drain(&mut gpiob.crh);
 
-    let mut nrf24 = NRF24L01::new(ce, csn, spi).unwrap();
-    nrf24.set_frequency(76).unwrap();
-    nrf24.set_auto_retransmit(5, 15).unwrap();
-    nrf24.set_rf(&DataRate::R1Mbps, 3).unwrap();
-    nrf24
-        .set_pipes_rx_enable(&[true, false, false, false, false, false])
-        .unwrap();
-    nrf24
-        .set_auto_ack(&[true, true, true, true, true, true])
-        .unwrap();
-    nrf24.set_pipes_rx_lengths(&[Some(32); 6]).unwrap();
-    nrf24.set_crc(CrcMode::OneByte).unwrap();
-    nrf24.set_rx_addr(1, ADDR).unwrap();
-    nrf24.set_tx_addr(ADDR).unwrap();
-    nrf24.flush_rx().unwrap();
-    nrf24.flush_tx().unwrap();
-    defmt::info!("NRF done, freq = {:?} ({})", nrf24.get_frequency().unwrap(), 76);
+    let i2c = BlockingI2c::i2c1(
+        device.I2C1,
+        (scl, sda),
+        &mut afio.mapr,
+        Mode::Fast {
+            frequency: 400.kHz(),
+            duty_cycle: DutyCycle::Ratio2to1,
+        },
+        clocks,
+        1000,
+        10,
+        1000,
+        1000,
+    );
 
-    let mut delay = device.TIM1.delay_us(&clocks);
+    defmt::info!("I2C done");
 
-    let mut rx = nrf24.rx().unwrap();
-
-    const CHANNELS: usize = 126;
+    let mut max = max30100::Max30100::new(i2c, max30100::Config::default()).expect("max");
+    defmt::info!("config init");
 
     loop {
-        let mut buf = [0u8; CHANNELS];
-
-        let payload = rx.read().unwrap();
-        for chan in 0..CHANNELS {
-            buf[chan] = HEX[chan >> 4];
-        }
-        defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
-        for chan in 0..CHANNELS {
-            buf[chan] = HEX[chan & 0xf];
-        }
-        defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
-        loop {
-            let mut noise = [0u8; CHANNELS];
-            for i in 0..100 {
-                for chan in 0..CHANNELS {
-                    rx.set_frequency(chan as u8).unwrap();
-                    rx.set_pipes_rx_enable(&[true; 6]).unwrap();
-                    delay.delay_us(128u32);
-                    rx.set_pipes_rx_enable(&[false; 6]).unwrap();
-                    if rx.has_carrier().unwrap() {
-                        noise[chan] += 1;
-                    }
-                }
-            }
-            for chan in 0..CHANNELS {
-                buf[chan] = HEX[noise[chan] as usize & 0xf];
-            }
-            defmt::info!("{}", core::str::from_utf8(&buf).unwrap());
-        }
+        // max.read_temperature().expect("read");
+        // delay.delay_ms(100u32);
+        // let temp = max.get_temperature().expect("get");
+        // defmt::info!("temp: {}", temp);
+        let fifo = max.read_fifo().unwrap();
+        // defmt::info!("FIFO: ir = {} / r = {}", fifo.infrared, fifo.red);
+        serial.bwrite_all(&u16::to_ne_bytes(fifo.infrared)).unwrap();
+        serial.bwrite_all(&u16::to_ne_bytes(fifo.red)).unwrap();
     }
-
-    /*let mut tx = nrf24.tx().unwrap();
-
-    loop {
-        tx.send(b"CRAP").unwrap();
-        tx.wait_empty().unwrap();
-    }*/
 }
