@@ -8,12 +8,14 @@ use panic_probe as _;
 #[rtic::app(device = stm32f1xx_hal::pac)]
 mod app {
     use core::sync::atomic::{AtomicU32, Ordering};
+    use cortex_m::peripheral::NVIC;
     use stm32f1xx_hal::{
         gpio::{gpioa::PA0, Edge, ExtiPin, Input},
         prelude::*,
     };
     use stm32f1xx_hal::device::TIM1;
-    use stm32f1xx_hal::gpio::{Floating, IOPinSpeed, OutputSpeed};
+    use stm32f1xx_hal::gpio::{Floating, IOPinSpeed, Output, OutputSpeed, PA15, PC13};
+    use stm32f1xx_hal::pac::Interrupt;
     use stm32f1xx_hal::timer::PwmChannel;
 
     static TICKS: AtomicU32 = AtomicU32::new(0);
@@ -24,8 +26,8 @@ mod app {
 
     #[local]
     struct Local {
-        button: PA0<Input<Floating>>,
-        ch0: PwmChannel<TIM1, 0>,
+        button: PA15<Input<Floating>>,
+        led: PC13<Output>,
     }
 
     #[init]
@@ -41,41 +43,41 @@ mod app {
             .pclk2(72.MHz())
             .freeze(&mut flash.acr);
 
+        unsafe {
+            NVIC::unmask(Interrupt::EXTI15_10);
+        }
+
         let mut gpioa = ctx.device.GPIOA.split();
-        let mut led = gpioa.pa8.into_alternate_push_pull(&mut gpioa.crh);
-        led.set_speed(&mut gpioa.crh, IOPinSpeed::Mhz50);
-        let etr = gpioa.pa12.into_alternate_push_pull(&mut gpioa.crh);
+        let mut gpiob = ctx.device.GPIOB.split();
+        let mut gpioc = ctx.device.GPIOC.split();
 
-        let timer = ctx.device.TIM1;
-        // timer.counter(&clocks).set_master_mode(MMS_A::ComparePulse)
-        let timer = timer.pwm_hz(led, &mut afio.mapr, (256 * 50 / 2).Hz(), &clocks);
-        let max = timer.get_max_duty();
-        let mut ch0 = timer.split();
-        ch0.enable();
-        ch0.set_duty(max / 2);
+        let (pa15, pb3, pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);
 
-        let mut button = gpioa.pa0.into_floating_input(&mut gpioa.crl);
+        let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
+        led.set_speed(&mut gpioc.crh, IOPinSpeed::Mhz50);
+
+        let mut button = pa15.into_floating_input(&mut gpioa.crh);
         button.make_interrupt_source(&mut afio);
         button.enable_interrupt(&mut exti);
-        button.trigger_on_edge(&mut exti, Edge::Rising);
+        button.trigger_on_edge(&mut exti, Edge::RisingFalling);
         defmt::println!("init");
 
-        (Shared { }, Local { button, ch0 })
+        (Shared { }, Local { button, led })
     }
 
     #[idle]
     fn idle(_ctx: idle::Context) -> ! {
         loop {
-            TICKS.fetch_add(1, Ordering::Relaxed);
+
         }
     }
 
-    #[task(binds = EXTI0, local = [button, ch0], priority = 2)]
+    #[task(binds = EXTI15_10, local = [button, led], priority = 2)]
     fn pps_tick(ctx: pps_tick::Context) {
         ctx.local.button.clear_interrupt_pending_bit();
         let timer: TIM1 = unsafe { core::mem::transmute(()) };
         timer.cr1.write(|w| w.cen().clear_bit());
         timer.ccr1().write(|w| w.ccr().variant(0));
-        ctx.local.ch0.set_duty(ctx.local.ch0.get_duty());
+        ctx.local.led.toggle();
     }
 }
