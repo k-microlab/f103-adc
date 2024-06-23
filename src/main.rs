@@ -78,7 +78,7 @@ mod app {
         let mut pps = pa15.into_floating_input(&mut gpioa.crh);
         pps.make_interrupt_source(&mut afio);
         pps.enable_interrupt(&mut exti);
-        pps.trigger_on_edge(&mut exti, Edge::RisingFalling);
+        pps.trigger_on_edge(&mut exti, Edge::Rising);
         defmt::println!("init");
 
         let tx = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
