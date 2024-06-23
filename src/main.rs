@@ -126,7 +126,7 @@ mod app {
     #[task(binds = EXTI15_10, local = [pps, led], priority = 2)]
     fn pps_tick(ctx: pps_tick::Context) {
         let timer: TIM1 = unsafe { core::mem::transmute(()) };
-        timer.cr1.write(|w| w.cen().clear_bit());
+        // timer.cr1.write(|w| w.cen().clear_bit());
         timer.ccr1().write(|w| w.ccr().variant(0));
         ctx.local.pps.clear_interrupt_pending_bit();
         ctx.local.led.toggle();
